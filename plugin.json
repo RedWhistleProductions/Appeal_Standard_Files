@@ -1,0 +1,22 @@
+{
+    "schema_version":  1,
+    "name":  "Appeal_Standard_Files",
+    "version":  "1.0.0-beta.1",
+    "module":  "Files",
+    "platforms":  [
+                      "windows-x64",
+                      "linux-x64"
+                  ],
+    "artifacts":  {
+                      "windows":  "Appeal_Standard_Files.dll",
+                      "linux":  "Appeal_Standard_Files.so"
+                  },
+    "runtime_dependencies":  {
+                                 "windows":  [
+
+                                             ],
+                                 "linux_debian":  [
+
+                                                  ]
+                             }
+}
