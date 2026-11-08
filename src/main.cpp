@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <memory>
 #include <vector>
 
 #include "Named_List.h"
@@ -198,6 +199,14 @@ fs::path Resolve_Path(std::string Path)
 		return Direct;
 	}
 
+    // A path from a resource-root picker stays rooted there even for a new file.
+    fs::path Resource_Root = fs::absolute(fs::path(Resources_Path)).lexically_normal();
+    const std::string Root_Name = Resource_Root.filename().string();
+    if(!Root_Name.empty() && Path.rfind(Root_Name + "/", 0) == 0)
+    {
+        return Resource_Root.parent_path() / Direct;
+    }
+
 	fs::path Resource_Candidate = fs::path(Resources_Path) / Path;
 	if(fs::exists(Resource_Candidate))
 	{
@@ -264,6 +273,51 @@ extern "C" void Set_Paths(std::string Resources)
 	}
 }
 
+std::string JSON_Quote(const std::string &Text)
+{
+    std::string Out="\"";
+    const char *Hex="0123456789abcdef";
+    for(unsigned char C:Text) {
+        if(C=='"' || C=='\\') {Out+='\\';Out+=char(C);}
+        else if(C<32) {Out+="\\u00";Out+=Hex[C>>4];Out+=Hex[C&15];}
+        else Out+=char(C);
+    }
+    return Out+"\"";
+}
+extern "C" std::string Scan_Graphics(std::string Path)
+{
+    const fs::path Root=Resolve_Path(Path);
+    std::error_code Error;
+    if(!fs::is_directory(Root,Error)) return "[]";
+    std::vector<fs::path> Files;
+    for(fs::recursive_directory_iterator It(Root,fs::directory_options::skip_permission_denied,Error),End;It!=End;It.increment(Error)) {
+        if(Error) {Error.clear();continue;}
+        if(!It->is_regular_file(Error)) continue;
+        const auto Extension=Lower(It->path().extension().string());
+        if(Extension==".json" || Extension==".png" || Extension==".bmp" || Extension==".jpg" || Extension==".jpeg") Files.push_back(It->path());
+    }
+    std::sort(Files.begin(),Files.end());
+    std::string Out="["; bool First=true;
+    for(const auto &File:Files) {
+        std::string Data;
+        const bool Metadata=Lower(File.extension().string())==".json";
+        if(Metadata) {
+            const auto Size=fs::file_size(File,Error);
+            if(Error || Size>8*1024*1024) {Error.clear();continue;}
+            std::ifstream Input(File,std::ios::binary);
+            if(!Input) continue;
+            Data.assign(std::istreambuf_iterator<char>(Input),{});
+            if(Data.size()>=3 && static_cast<unsigned char>(Data[0])==0xef && static_cast<unsigned char>(Data[1])==0xbb && static_cast<unsigned char>(Data[2])==0xbf) Data.erase(0,3);
+        }
+        const auto Relative=fs::relative(File,Root,Error).generic_string();
+        if(Error) {Error.clear();continue;}
+        if(!First) Out+=",";
+        First=false;
+        Out+="{\"File\":"+JSON_Quote(Relative)+",\"Folder\":"+JSON_Quote(fs::path(Relative).parent_path().generic_string())+",\"Kind\":"+JSON_Quote(Metadata ? "Metadata" : "Image")+",\"Data\":"+JSON_Quote(Data)+"}";
+    }
+    return Out+"]";
+}
+
 extern "C" std::string Scan(std::string Name, std::string Path)
 {
 	(void)Name;
@@ -312,7 +366,8 @@ extern "C" bool Open(std::string Name, std::string File, std::string Mode)
 {
 	Close(Name);
 
-	File_Handle *Handle = new File_Handle;
+	auto Owned_Handle = std::make_unique<File_Handle>();
+	File_Handle *Handle = Owned_Handle.get();
 	Handle->Name = Name;
 	Handle->File = Normalize_Path(Resolve_Path(File).string());
 	Handle->Mode = Mode;
@@ -348,11 +403,11 @@ extern "C" bool Open(std::string Name, std::string File, std::string Mode)
 		{
 			std::cout << "Files open failed: " << Handle->File << std::endl;
 		}
-		delete Handle;
 		return false;
 	}
 
 	Handles.Add_Node(Name, Handle);
+	Owned_Handle.release();
 	if(DEBUG)
 	{
 		std::cout << "Files opened: " << Name << " -> " << Handle->File << std::endl;
@@ -427,29 +482,24 @@ extern "C" std::string Read_All(std::string File)
 
 extern "C" bool Write_All(std::string File, std::string Value)
 {
-	fs::path Path = Resolve_Path(File);
-	fs::path Parent = Path.parent_path();
-	if(!Parent.empty())
-	{
-		fs::create_directories(Parent);
-	}
-
-	std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
-	if(!Output)
-	{
-		if(DEBUG)
-		{
-			std::cout << "Files write all failed: " << Path.string() << std::endl;
-		}
-		return false;
-	}
-
-	Output << Value;
-	if(DEBUG)
-	{
-		std::cout << "Files write all: " << Path.string() << std::endl;
-	}
-	return true;
+    try
+    {
+        fs::path Path = Resolve_Path(File);
+        fs::path Parent = Path.parent_path();
+        if(!Parent.empty()) fs::create_directories(Parent);
+        std::ofstream Output(Path,std::ios::binary | std::ios::trunc);
+        if(!Output) return false;
+        Output.write(Value.data(),static_cast<std::streamsize>(Value.size()));
+        Output.flush();
+        const bool Saved=static_cast<bool>(Output);
+        if(DEBUG) std::cout << "Files write all: " << Path.string() << " success=" << Saved << std::endl;
+        return Saved;
+    }
+    catch(const fs::filesystem_error &Error)
+    {
+        if(DEBUG) std::cout << "Files write all failed: " << Error.what() << std::endl;
+        return false;
+    }
 }
 
 extern "C" std::string Join(std::string Left, std::string Right)
